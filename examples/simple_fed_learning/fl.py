@@ -21,7 +21,7 @@ class Env(Structure):
     _pack_ = 1
     _fields_ = [
         ('datarate', c_double),
-        ('latency', c_double),
+        ('latency', c_double)
     ]
 
 # The result (in this example, contain 'c') calculated by python
@@ -32,16 +32,22 @@ class Act(Structure):
         ('c', c_double)
     ]
 
+class Array(Structure):
+    _pack_ = 1
+    _fields_ = [
+        ('env', Env*2)
+    ]
+
 
 ns3Settings = {'spokes': 3, 'rounds': 3}
 mempool_key = 1234                                          # memory pool key, arbitrary integer large than 1000
 mem_size = 4096                                             # memory pool size in bytes
-memblock_key = 2338                                        # memory block key, need to keep the same in the ns-3 script
+memblock_key = 2343                                        # memory block key, need to keep the same in the ns-3 script
 exp = Experiment(mempool_key, mem_size, 'simple_fed_learning', '../../')      # Set up the ns-3 environment
 try:
     exp.reset()                                             # Reset the environment
-    rl = Ns3AIRL(memblock_key, Env, Act)                    # Link the shared memory block with ns-3 script
-    ns3Settings['spokes'] = 3
+    rl = Ns3AIRL(memblock_key, Array, Act)                    # Link the shared memory block with ns-3 script
+    ns3Settings['spokes'] = 2
     ns3Settings['rounds'] = 3
     pro = exp.run(setting=ns3Settings, show_output=True)    # Set and run the ns-3 script (sim.cc)
     while not rl.isFinish():
@@ -49,8 +55,8 @@ try:
             if data == None:
                 break
             # AI algorithms here and put the data back to the action
-            print("a " + str(data.env.datarate))
-            print("b " + str(data.env.latency))
+            print("a " + str(data.env.env[0].datarate))
+            print("b " + str(data.env.env[1].datarate))
             data.act.c = 0
             
     pro.wait()                                              # Wait the ns-3 to stop

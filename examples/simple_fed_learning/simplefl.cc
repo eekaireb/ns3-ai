@@ -24,12 +24,16 @@
 #include "ns3/flow-monitor-module.h"
 #include "ns3/ipv4-global-routing-helper.h"
 
-// Default Network Topology
+// Network Topology
 //
-//       10.1.1.0
-// n0 -------------- n1
-//    point-to-point
-//
+// n1     n2     n3
+//  \      |     /
+//   \     |    /
+//    \    |   /     
+//      n4n5n6
+// Trying to simulute star topology with 
+// p2p links, but its a little hacky right now
+
  
 
 using namespace ns3;
@@ -38,55 +42,66 @@ using namespace std;
 NS_LOG_COMPONENT_DEFINE ("FirstScriptExample");
 
 
+//Structure to represent the client's data
+//Set by ns3
 struct Env{
   double datarate;
   double latency;
 }Packed;
 
+//Some result from training
+//Not used right now
 struct Act
 {
     double c;
 }Packed;
 
-class FL : public Ns3AIRL<Env, Act>
+//An array to manage client's data easily
+struct Array{
+  Env arr[2];
+}Packed;
+
+class FL : public Ns3AIRL<Array, Act>
 {
 public:
     FL(uint16_t id);
-    int Func(double a, double b);
+    void Func(double a, double b, int k);
 };
 
-FL::FL(uint16_t id) : Ns3AIRL<Env, Act>(id) {
+FL::FL(uint16_t id) : Ns3AIRL<Array, Act>(id) {
     SetCond(2, 0);      ///< Set the operation lock (even for ns-3 and odd for python).
 }
 
-int FL::Func(double a, double b)
+//access shared memory and update latency
+void FL::Func(double a, double b, int k)
 {
     auto env = EnvSetterCond();     ///< Acquire the Env memory for writing
-    env->datarate = a;
-    env->latency = b;
+    env->arr[k-1].latency = b;
     SetCompleted();                 ///< Release the memory and update conters
     NS_LOG_DEBUG ("Ver:" << (int)SharedMemoryPool::Get()->GetMemoryVersion(m_id));
-    auto act = ActionGetterCond();  ///< Acquire the Act memory for reading
-    int ret = act->c;
-    GetCompleted();                 ///< Release the memory, roll back memory version and update conters
-    NS_LOG_DEBUG ("Ver:" << (int)SharedMemoryPool::Get()->GetMemoryVersion(m_id));
-    return ret;
 }
 
+/*
 void
 ModifyLinkRate(NetDeviceContainer *ptp, DataRate lr) {
     NS_LOG_UNCOND ("Change data rate");
     StaticCast<PointToPointNetDevice>(ptp->Get(0))->SetDataRate(lr);
-}
+}*/
 
-void FlowFunction(Ptr<FlowMonitor> monitor, Ptr<Ipv4FlowClassifier> classifier, FL* fl)
+//print out the flow results from a communication round and update the latency in ns3
+//not sure this approach will work for async
+void FlowFunction(Ptr<FlowMonitor> monitor, Ptr<Ipv4FlowClassifier> classifier, FL* fl, int spokes)
 {
+    NS_LOG_UNCOND("Begin round");
     monitor->CheckForLostPackets ();
     FlowMonitor::FlowStatsContainer stats = monitor->GetFlowStats ();
     double a = 0;
     double b = 0;
+    int k = 0;
     for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin (); i != stats.end (); ++i)
-    {
+    { 
+        if(k >= spokes) // since half the nodes represent the server, we only check the ones that represent clients
+          break;
         Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (i->first);
 
         std::cout << "Flow " << i->first  << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")\n";
@@ -97,18 +112,17 @@ void FlowFunction(Ptr<FlowMonitor> monitor, Ptr<Ipv4FlowClassifier> classifier, 
         std::cout << "  Throughput: " << i->second.rxBytes * 8.0 / 9 / 1000 / 1000  << " Mbps\n";
         a = i->second.rxBytes * 8.0 / 9 / 1000 / 1000; //Mbps
         b = (i->second.timeLastRxPacket - i->second.timeLastTxPacket).GetDouble()/1000000000; //seconds
+        k++;
+        fl->Func(a,b,k);
     }
+    NS_LOG_UNCOND("End round");
 
-  fl->Func(a,b);
 }
-
-
 
 int
 main (int argc, char *argv[])
 {
-
-  int memblock_key = 2338;        ///< memory block key, need to keep the same in the python script
+  int memblock_key = 2343;        ///< memory block key, need to keep the same in the python script, changes each time shared memory size changes
   FL fl(memblock_key);
   
 
@@ -116,6 +130,8 @@ main (int argc, char *argv[])
   LogComponentEnable ("UdpEchoClientApplication", LOG_LEVEL_INFO);
   LogComponentEnable ("UdpEchoServerApplication", LOG_LEVEL_INFO);
 
+
+  //parse command line args to set spoke number in star, and number of communication rounds
   NodeContainer nodes;
   int spokes = 2; 
   CommandLine cmd;
@@ -123,7 +139,6 @@ main (int argc, char *argv[])
   cmd.AddValue("spokes", "Number of clients", spokes);
   cmd.AddValue("rounds", "Number of rounds", rounds);
   cmd.Parse (argc, argv);
-
   nodes.Create (spokes*2);
 
   PointToPointHelper pointToPoint;
@@ -132,6 +147,7 @@ main (int argc, char *argv[])
 
   NetDeviceContainer devices;
 
+  //add p2p links between each node and then a "server"
   for(int i = 0; i <spokes; i++)
   {
     devices.Add(pointToPoint.Install(nodes.Get(i), nodes.Get(spokes+i)));
@@ -145,7 +161,10 @@ main (int argc, char *argv[])
 
   Ipv4InterfaceContainer interfaces = address.Assign (devices);
 
-  int k = 1;
+  int k = 1; 
+  //when theres 3 spokes 
+  // 0, 2, 4 are clients
+  // 1, 3, 5 are servers
   for(int i = 0; i < spokes; i++)
   {
     //NS_LOG_UNCOND(interfaces.GetAddress(i));
@@ -162,14 +181,10 @@ main (int argc, char *argv[])
     ApplicationContainer clientApps = echoClient.Install (nodes.Get (i));
     clientApps.Start (Seconds (2.0));
     clientApps.Stop (Seconds (10.0));
-    k+=2;
+    k+=2; 
 
   }
 
- 
-
-
- 
   // Flow Monitor
   FlowMonitorHelper flowmon;
   Ptr<FlowMonitor> monitor = flowmon.InstallAll ();
@@ -177,28 +192,11 @@ main (int argc, char *argv[])
 
   for(int i = 0; i < rounds; i++)
   {
-    Simulator::Schedule(Seconds(i+2.5),FlowFunction, monitor, classifier, &fl);
+    Simulator::Schedule(Seconds(i+2.5),FlowFunction, monitor, classifier, &fl, spokes);
   }
-  //Simulator::Schedule(Seconds(3),FlowFunction, monitor, classifier, &fl);
-  //Simulator::Schedule(Seconds(5),FlowFunction, monitor, classifier, &fl);
-  //Simulator::Schedule(Seconds(4), &FL::Func, &fl, a,b);
+
   Simulator::Stop (Seconds (10));
   Simulator::Run();
-
-/*
-    monitor->CheckForLostPackets ();
-    FlowMonitor::FlowStatsContainer stats = monitor->GetFlowStats ();
-    for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin (); i != stats.end (); ++i)
-    {
-        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow (i->first);
-
-        std::cout << "Flow " << i->first  << " (" << t.sourceAddress << " -> " << t.destinationAddress << ")\n";
-        std::cout << "  Tx Packets: " << i->second.txPackets << "\n";
-        std::cout << "  Tx Bytes:   " << i->second.txBytes << "\n";
-        std::cout << "  Rx Packets: " << i->second.rxPackets << "\n";
-        std::cout << "  Rx Bytes:   " << i->second.rxBytes << "\n";
-        std::cout << "  Throughput: " << i->second.rxBytes * 8.0 / 9 / 1000 / 1000  << " Mbps\n";
-}*/
   
   Simulator::Destroy ();
   return 0; 
